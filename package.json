@@ -1,0 +1,59 @@
+{
+  "name": "webgl-images-view-transitions",
+  "version": "1.0.0",
+  "description": "Animaciones WebGL aplicadas a imágenes en transiciones entre páginas usando View Transitions API con Astro",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Ivan Albizu",
+    "email": "ivan.albizu@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivanalbizu/webgl-images-view-transitions.git"
+  },
+  "homepage": "https://github.com/ivanalbizu/webgl-images-view-transitions#readme",
+  "bugs": {
+    "url": "https://github.com/ivanalbizu/webgl-images-view-transitions/issues"
+  },
+  "keywords": [
+    "astro-component",
+    "astro",
+    "webgl",
+    "view-transitions",
+    "three.js",
+    "animations",
+    "transitions"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./WebGLViewTransitions.astro": "./dist/components/WebGLViewTransitions.astro"
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "astro": "^4.0.0 || ^5.0.0",
+    "three": "^0.150.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "package": "tsup src/index.ts --format esm --dts --clean --external .astro && copyfiles -u 1 \"src/**/*.astro\" dist",
+    "prepublishOnly": "pnpm run package",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "lil-gui": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.173.0",
+    "astro": "^5.16.6",
+    "copyfiles": "^2.4.1",
+    "three": "^0.173.0",
+    "tsup": "^8.0.0"
+  }
+}

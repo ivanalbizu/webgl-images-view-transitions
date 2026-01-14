@@ -1,0 +1,1 @@
+export { default as WebGLViewTransitions } from './components/WebGLViewTransitions.astro';

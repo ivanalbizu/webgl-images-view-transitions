@@ -1,0 +1,591 @@
+---
+/**
+ * @component TransitionCanvas
+ * @description Componente que gestiona transiciones de página fluidas utilizando WebGL y Astro View Transitions.
+ * Crea un efecto de distorsión líquida entre las imágenes coincidentes de la página saliente y la entrante.
+ */
+interface Props {
+  /** URL de la imagen de textura para el mapa de desplazamiento (blanco y negro). */
+  displacementImage: string;
+  /**
+   * Velocidad de la transición (0.001 a 0.1).
+   * @default 0.015
+   */
+  speed?: number;
+  /**
+   * Intensidad de la distorsión.
+   * @default 0.25
+   */
+  intensity?: number;
+  /** Muestra un panel de control GUI para ajustar valores en tiempo real. */
+  debug?: boolean;
+  /** Función de tiempo para la animación. */
+  easing?: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  /** Cantidad de zoom durante la transición (efecto de profundidad). */
+  zoom?: number;
+  /** Escala de la textura de desplazamiento (frecuencia de las ondas). */
+  dispScale?: number;
+  /** 
+   * Índice Z del contenedor del canvas. Útil para superponer o colocar detrás de otros elementos.
+   * @default 1
+   */
+  zIndex?: number;
+}
+
+const { displacementImage, speed = 0.015, intensity = 0.25, debug = import.meta.env.DEV, easing = 'easeOut', zoom = 0.1, dispScale = 1.0, zIndex = 1 } = Astro.props;
+---
+<div id="webgl-container" style={`z-index: ${zIndex};`} data-displacement={displacementImage} data-speed={speed} data-intensity={intensity} data-debug={debug.toString()} data-easing={easing} data-zoom={zoom} data-disp-scale={dispScale} transition:persist></div>
+
+<style is:global>
+  #webgl-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  /* Ocultamos las imágenes originales pero mantenemos su layout y eventos */
+  /* Solo aplicamos esto si el JS ha confirmado que el router y WebGL están listos */
+  html.webgl-active img[data-sampler] {
+    opacity: 0;
+  }
+</style>
+
+<script>
+  import * as THREE from 'three';
+
+  // --- CONSTANTES & SHADERS ---
+
+  const VERTEX_SHADER = `
+    varying vec2 vUv;
+
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `;
+
+  function lerp(start: number, end: number, t: number) {
+    return start * (1 - t) + end * t;
+  }
+
+  const FRAGMENT_SHADER = `
+    uniform sampler2D uTexture1;
+    uniform sampler2D uTexture2;
+    uniform sampler2D uDisplacement;
+    uniform float uProgress;
+    uniform float uIntensity;
+    uniform float uZoom;
+    uniform float uDispScale;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 disp = texture2D(uDisplacement, vUv * uDispScale);
+      vec2 dispVec = vec2(disp.r, disp.g);
+
+      // Efecto de Zoom (sinusoidal para que entre y salga)
+      float zoomFactor = 1.0 + uZoom * sin(uProgress * 3.14159);
+      vec2 centered = vUv - 0.5;
+      vec2 zoomedUv = centered / zoomFactor + 0.5;
+
+      vec2 uv1 = zoomedUv + dispVec * (uProgress * uIntensity);
+      vec2 uv2 = zoomedUv - dispVec * ((1.0 - uProgress) * uIntensity);
+
+      vec4 t1 = texture2D(uTexture1, uv1);
+      vec4 t2 = texture2D(uTexture2, uv2);
+
+      gl_FragColor = mix(t1, t2, uProgress);
+    }
+  `;
+
+  // --- INTERFACES ---
+
+  /** Extensión de Navigator para APIs experimentales o específicas de Chrome */
+  interface ExtendedNavigator extends Navigator {
+    deviceMemory?: number;
+    connection?: {
+      saveData?: boolean;
+    };
+  }
+
+  interface MeshData {
+    mesh: THREE.Mesh;
+    img: HTMLImageElement;
+    material: THREE.ShaderMaterial;
+    progress: number; // 0 a 1
+    startState?: ImageState | null;
+  }
+
+  interface ImageState {
+    texture: THREE.Texture;
+    width: number;
+    height: number;
+    x: number;
+    y: number;
+  }
+
+  /**
+   * Controlador para el panel de depuración (lil-gui).
+   * Se carga dinámicamente solo si debug=true.
+   */
+  class DebugController {
+    private gui: any = null;
+    private transition: WebGLViewTransitions;
+    private container: HTMLElement | null;
+
+    constructor(transition: WebGLViewTransitions, container: HTMLElement | null) {
+      this.transition = transition;
+      this.container = container;
+      this.init();
+    }
+
+    private async init() {
+      try {
+        const { default: GUI } = await import('lil-gui');
+        if (this.gui) this.gui.destroy();
+
+        this.gui = new GUI({ container: this.container || document.body, autoPlace: false });
+
+        // Gestión robusta de estilos para View Transitions
+        // lil-gui inyecta estilos solo una vez. Si Astro los elimina al navegar, debemos restaurarlos.
+        let guiStyle = Array.from(document.querySelectorAll('style')).find(style => 
+          style.innerHTML && style.innerHTML.includes('.lil-gui')
+        );
+
+        if (guiStyle) {
+          guiStyle.setAttribute('data-astro-transition-persist', 'lil-gui');
+          (window as any)._lilGuiStyles = guiStyle.innerHTML;
+        } else if ((window as any)._lilGuiStyles) {
+          const newStyle = document.createElement('style');
+          newStyle.innerHTML = (window as any)._lilGuiStyles;
+          newStyle.setAttribute('data-astro-transition-persist', 'lil-gui');
+          document.head.appendChild(newStyle);
+        }
+
+        this.gui.domElement.style.position = 'absolute';
+        this.gui.domElement.style.top = '10px';
+        this.gui.domElement.style.right = '10px';
+        this.gui.domElement.style.pointerEvents = 'auto';
+
+        if (this.container) {
+          this.container.appendChild(this.gui.domElement);
+        }
+
+        const params = {
+          speed: this.transition.speed,
+          intensity: this.transition.intensity,
+          easing: this.transition.easing,
+          zoom: this.transition.zoom,
+          dispScale: this.transition.dispScale
+        };
+
+        this.gui.add(params, 'speed', 0.001, 0.1).name('Velocidad').onChange((v: number) => {
+          this.transition.speed = v;
+          this.transition.userHasInteracted = true;
+        });
+
+        this.gui.add(params, 'intensity', 0.0, 2.0).name('Intensidad').onChange((v: number) => {
+          this.transition.setIntensity(v);
+          this.transition.userHasInteracted = true;
+        });
+
+        this.gui.add(params, 'easing', ['linear', 'easeIn', 'easeOut', 'easeInOut']).name('Curva (Easing)').onChange((v: string) => {
+          this.transition.easing = v;
+          this.transition.userHasInteracted = true;
+        });
+
+        this.gui.add(params, 'zoom', 0.0, 1.0).name('Zoom').onChange((v: number) => {
+          this.transition.setZoom(v);
+          this.transition.userHasInteracted = true;
+        });
+
+        this.gui.add(params, 'dispScale', 0.1, 5.0).name('Escala Disp.').onChange((v: number) => {
+          this.transition.setDispScale(v);
+          this.transition.userHasInteracted = true;
+        });
+      } catch (e) {
+        console.warn('No se pudo cargar lil-gui', e);
+      }
+    }
+
+    public destroy() {
+      if (this.gui) {
+        this.gui.destroy();
+        this.gui = null;
+      }
+    }
+  }
+
+  /**
+   * Clase principal que gestiona la escena WebGL y las transiciones.
+   */
+  class WebGLViewTransitions {
+    private renderer!: THREE.WebGLRenderer;
+    private scene!: THREE.Scene;
+    private camera!: THREE.OrthographicCamera;
+    private meshes: MeshData[] = [];
+    private displacementTexture: THREE.Texture | null = null;
+    private currentDisplacementUrl: string | undefined;
+    private lastStates: ImageState[] = [];
+    private geometry: THREE.PlaneGeometry;
+    private container: HTMLElement | null = null;
+    private rafId: number | null = null;
+    public speed: number = 0.005;
+    public intensity: number = 0.25;
+    public easing: string = 'easeOut';
+    public zoom: number = 0.1;
+    public dispScale: number = 1.0;
+    public userHasInteracted: boolean = false;
+    private debugCtrl: DebugController | null = null;
+
+    constructor() {
+      this.geometry = new THREE.PlaneGeometry(1, 1, 32, 32);
+      this.init();
+      
+
+      this.onResize = this.onResize.bind(this);
+      this.onScroll = this.onScroll.bind(this);
+      this.setupScene = this.setupScene.bind(this);
+      this.captureStates = this.captureStates.bind(this);
+      this.animate = this.animate.bind(this);
+
+      window.addEventListener('resize', this.onResize);
+      window.addEventListener('scroll', this.onScroll);
+      window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', this.setupScene);
+      document.addEventListener('astro:before-swap', this.captureStates);
+      document.addEventListener('astro:page-load', this.setupScene);
+      
+      this.animate();
+    }
+
+    /**
+     * Inicia o reanuda el bucle de animación si no está activo.
+     */
+    private startAnimationLoop() {
+      if (this.rafId === null) {
+        // Kick off the animation loop. It will self-perpetuate if needed.
+        this.rafId = requestAnimationFrame(this.animate);
+      }
+    }
+
+    private init() {
+      this.container = document.getElementById('webgl-container');
+      if (!this.container) return;
+
+      this.scene = new THREE.Scene();
+      
+      this.camera = new THREE.OrthographicCamera(
+        window.innerWidth / -2,
+        window.innerWidth / 2,
+        window.innerHeight / 2,
+        window.innerHeight / -2,
+        1,
+        1000
+      );
+      this.camera.position.z = 10;
+
+      this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      this.container.appendChild(this.renderer.domElement);
+    }
+
+    private onResize() {
+      if (!this.renderer || !this.camera) return;
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.camera.left = window.innerWidth / -2;
+      this.camera.right = window.innerWidth / 2;
+      this.camera.top = window.innerHeight / 2;
+      this.camera.bottom = window.innerHeight / -2;
+      this.camera.updateProjectionMatrix();
+      this.startAnimationLoop(); // Request a render on resize
+    }
+
+    private onScroll() {
+      this.startAnimationLoop(); // Request a render on scroll
+    }
+
+    private createMesh(img: HTMLImageElement, prevState: ImageState | null): MeshData {
+      const loader = new THREE.TextureLoader();
+      loader.setCrossOrigin('anonymous');
+
+      // 1. Despertar el bucle cuando la textura WebGL esté lista
+      const nextTexture = loader.load(img.src, () => {
+        this.startAnimationLoop();
+      });
+
+      // 2. Despertar el bucle cuando la imagen DOM cargue (para tener dimensiones correctas)
+      if (!img.complete) {
+        img.addEventListener('load', () => this.startAnimationLoop(), { once: true });
+      }
+      
+      const texture1 = prevState ? prevState.texture : nextTexture;
+      const texture2 = nextTexture;
+      
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          uTexture1: { value: texture1 },
+          uTexture2: { value: texture2 },
+          uDisplacement: { value: this.displacementTexture },
+          uProgress: { value: 0 },
+          uIntensity: { value: this.intensity },
+          uZoom: { value: this.zoom },
+          uDispScale: { value: this.dispScale }
+        },
+        vertexShader: VERTEX_SHADER,
+        fragmentShader: FRAGMENT_SHADER,
+        transparent: true
+      });
+
+      const mesh = new THREE.Mesh(this.geometry, material);
+      this.scene.add(mesh);
+
+      return {
+        mesh,
+        img,
+        material,
+        progress: prevState ? 0 : 1,
+        startState: prevState
+      };
+    }
+
+    private captureStates() {
+      // Guardamos el estado (textura, tamaño, posición) antes de que Astro cambie el DOM
+      this.lastStates = this.meshes.map(m => ({
+        texture: m.material.uniforms.uTexture2.value,
+        width: m.mesh.scale.x,
+        height: m.mesh.scale.y,
+        x: m.mesh.position.x,
+        y: m.mesh.position.y
+      }));
+    }
+
+    private isLowPerformance(): boolean {
+      // 1. Detectar modo "Ahorro de datos" del navegador/SO
+      if ((navigator as any).connection?.saveData) {
+        return true;
+      }
+
+      // 2. Heurística de Hardware
+      // deviceMemory (RAM en GB) - Solo Chrome/Edge. Valores: 0.25, 0.5, 1, 2, 4, 8...
+      const memory = (navigator as any).deviceMemory;
+      // hardwareConcurrency (Núcleos CPU)
+      const cores = navigator.hardwareConcurrency;
+
+      // Si tiene menos de 4GB de RAM o 2 o menos núcleos, asumimos gama baja.
+      // (Muchos móviles gama media tienen 8 núcleos, pero si tienen <4GB RAM suelen sufrir con WebGL)
+      return (memory && memory < 4) || (cores && cores <= 2);
+    }
+
+    private setupScene() {
+      const container = document.getElementById('webgl-container');
+
+      // Si el contenedor no existe (navegamos a una página sin el componente), destruimos la instancia.
+      if (!container) {
+        this.destroy();
+        return;
+      }
+
+      this.meshes.forEach(m => {
+        this.scene.remove(m.mesh);
+        m.material.dispose();
+      });
+      this.meshes = [];
+
+      // Accesibilidad y Rendimiento:
+      // Si el usuario prefiere movimiento reducido O el dispositivo es de gama baja
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || this.isLowPerformance()) {
+        document.documentElement.classList.remove('webgl-active');
+        if (this.rafId) {
+          cancelAnimationFrame(this.rafId);
+          this.rafId = null;
+        }
+        if (this.renderer) {
+          this.renderer.clear();
+        }
+        return;
+      }
+
+      const images = document.querySelectorAll('img[data-sampler^="texture"]');
+      const displacementUrl = container?.dataset.displacement;
+
+      // Solo sobrescribimos con los valores del HTML si el usuario NO ha tocado el debug
+      if (!this.userHasInteracted) {
+        if (container?.dataset.speed) {
+          this.speed = parseFloat(container.dataset.speed);
+        }
+        if (container?.dataset.intensity) {
+          this.intensity = parseFloat(container.dataset.intensity);
+        }
+        if (container?.dataset.easing) {
+          this.easing = container.dataset.easing;
+        }
+        if (container?.dataset.zoom) {
+          this.zoom = parseFloat(container.dataset.zoom);
+        }
+        if (container?.dataset.dispScale) {
+          this.dispScale = parseFloat(container.dataset.dispScale);
+        }
+      }
+      
+      // Reinicializamos siempre si es debug para restaurar los estilos CSS en el nuevo <head>
+      if (container?.dataset.debug === 'true') {
+        if (this.debugCtrl) this.debugCtrl.destroy();
+        this.debugCtrl = new DebugController(this, container);
+      }
+
+      if (!displacementUrl || images.length === 0) {
+        if (!displacementUrl) console.warn('TransitionCanvas: Debes pasar la prop "displacementImage" al componente.');
+        return;
+      }
+
+      if (!this.displacementTexture || this.currentDisplacementUrl !== displacementUrl) {
+        this.currentDisplacementUrl = displacementUrl;
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
+        this.displacementTexture = loader.load(
+          displacementUrl,
+          () => {
+            this.startAnimationLoop();
+          },
+          undefined,
+          (err: unknown) => console.error('Error cargando textura de desplazamiento:', err)
+        );
+        // Aseguramos que la textura se repita para que funcione el dispScale
+        this.displacementTexture.wrapS = this.displacementTexture.wrapT = THREE.RepeatWrapping;
+      }
+
+      images.forEach((img: any, index: number) => {
+        const prevState = this.lastStates[index] || null;
+        const meshData = this.createMesh(img as HTMLImageElement, prevState);
+        this.meshes.push(meshData);
+      });
+
+      // Si llegamos aquí, el Router funcionó y la escena se montó. Activamos los estilos.
+      document.documentElement.classList.add('webgl-active');
+
+      // Iniciamos el bucle de animación para la transición o para la actualización inicial de la posición
+      this.startAnimationLoop();
+    }
+
+    private destroy() {
+      if (this.rafId) cancelAnimationFrame(this.rafId);
+      
+      window.removeEventListener('resize', this.onResize);
+      window.removeEventListener('scroll', this.onScroll);
+      window.matchMedia('(prefers-reduced-motion: reduce)').removeEventListener('change', this.setupScene);
+      document.removeEventListener('astro:before-swap', this.captureStates);
+      document.removeEventListener('astro:page-load', this.setupScene);
+      
+      document.documentElement.classList.remove('webgl-active');
+
+      if (this.debugCtrl) {
+        this.debugCtrl.destroy();
+        this.debugCtrl = null;
+      }
+
+      this.meshes.forEach(m => {
+        this.scene.remove(m.mesh);
+        m.material.dispose();
+      });
+      this.meshes = [];
+
+      if (this.renderer) {
+        this.renderer.dispose();
+        this.renderer.forceContextLoss();
+      }
+    }
+
+    public setIntensity(v: number) {
+      this.intensity = v;
+      this.meshes.forEach(m => {
+        if (m.material.uniforms.uIntensity) m.material.uniforms.uIntensity.value = v;
+      });
+    }
+
+    public setZoom(v: number) {
+      this.zoom = v;
+      this.meshes.forEach(m => {
+        if (m.material.uniforms.uZoom) m.material.uniforms.uZoom.value = v;
+      });
+    }
+
+    public setDispScale(v: number) {
+      this.dispScale = v;
+      this.meshes.forEach(m => {
+        if (m.material.uniforms.uDispScale) m.material.uniforms.uDispScale.value = v;
+      });
+    }
+
+    private animate() {
+      let isAnimating = false;
+
+      this.meshes.forEach(data => {
+        if (data.progress < 1) {
+          data.progress += this.speed; // Usamos la velocidad configurada
+          if (data.progress > 1) data.progress = 1;
+          isAnimating = true;
+        }
+
+        // Función de Easing: Ease Out Cubic (rápido al inicio, suave al final)
+        let ease = data.progress;
+        switch (this.easing) {
+          case 'easeIn':
+            ease = data.progress * data.progress * data.progress;
+            break;
+          case 'easeInOut':
+            ease = data.progress < 0.5 ? 4 * data.progress * data.progress * data.progress : 1 - Math.pow(-2 * data.progress + 2, 3) / 2;
+            break;
+          case 'linear':
+            ease = data.progress;
+            break;
+          case 'easeOut':
+          default:
+            ease = 1 - Math.pow(1 - data.progress, 3);
+            break;
+        }
+        
+        data.material.uniforms.uProgress.value = ease;
+
+        const rect = data.img.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+        const left = rect.left - window.innerWidth / 2 + width / 2;
+        const top = -rect.top + window.innerHeight / 2 - height / 2;
+
+        // Si estamos en transición, interpolamos desde el estado anterior
+        if (data.startState && data.progress < 1) {
+          const p = ease;
+          
+          const currentWidth = lerp(data.startState.width, width, p);
+          const currentHeight = lerp(data.startState.height, height, p);
+          const currentX = lerp(data.startState.x, left, p);
+          const currentY = lerp(data.startState.y, top, p);
+
+          data.mesh.scale.set(currentWidth, currentHeight, 1);
+          data.mesh.position.set(currentX, currentY, 0);
+        } else {
+          // Si no hay transición o ya terminó, seguimos al elemento DOM exactamente
+          data.mesh.position.set(left, top, 0);
+          data.mesh.scale.set(width, height, 1);
+        }
+      });
+
+      if (this.renderer && this.scene && this.camera) {
+        this.renderer.render(this.scene, this.camera);
+      }
+
+      // Si hay una animación en curso, continuamos el bucle.
+      // Si no, el bucle se detiene hasta que un evento (scroll, resize, nav) lo reinicie.
+      if (isAnimating) {
+        this.rafId = requestAnimationFrame(this.animate);
+      } else {
+        this.rafId = null;
+      }
+    }
+  }
+
+  new WebGLViewTransitions();
+</script>
