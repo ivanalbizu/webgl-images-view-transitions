@@ -17,13 +17,11 @@ Este componente detecta las imágenes en la página saliente y entrante, y aplic
 
 ## 🚀 Instalación
 
-1.  **Instala el paquete** y sus dependencias en tu proyecto de Astro.
+Instala el paquete y sus dependencias en tu proyecto de Astro:
 
 ```bash
 npm install webgl-images-view-transitions three lil-gui
 ```
-
-Copia la carpeta del componente en tu proyecto (ej. `src/components/WebGLViewTransitions/`).
 
 ## 🛠 Uso
 
@@ -35,8 +33,7 @@ Importa y coloca el componente `WebGLViewTransitions` en tu Layout principal (o 
 ---
 // src/layouts/Layout.astro
 import { ClientRouter } from 'astro:transitions';
-import WebGLViewTransitions from '../components/WebGLViewTransitions.astro';
-import displacementImg from '../assets/displacement.jpg'; // Tu textura de desplazamiento
+import WebGLViewTransitions from 'webgl-images-view-transitions';
 ---
 
 <html lang="es">
@@ -46,8 +43,8 @@ import displacementImg from '../assets/displacement.jpg'; // Tu textura de despl
   <body>
     <slot />
     
-    <WebGLViewTransitions 
-      displacementImage={displacementImg.src}
+    <WebGLViewTransitions
+      displacementImage="/displacement.jpg"
       speed={0.02}
       intensity={0.4}
       zoom={0.2}
