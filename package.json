@@ -1,6 +1,6 @@
 {
   "name": "webgl-images-view-transitions",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Animaciones WebGL aplicadas a imágenes en transiciones entre páginas usando View Transitions API con Astro",
   "type": "module",
   "license": "MIT",
